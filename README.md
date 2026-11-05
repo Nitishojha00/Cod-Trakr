@@ -2,8 +2,6 @@
 
 > One dashboard for your competitive-programming journey: track stats across **LeetCode, Codeforces, CodeChef and GeeksforGeeks**, keep personal notes on problems (with your mistakes), and get personalised advice from an **AI coach** that helps to boost your skills in competitive-programming.
 
-**Frontend:** https://codtrakr.nitishojha.in  ·  **API:** https://cod-trakr-sor4.onrender.com
-
 ---
 
 ## Features
@@ -19,22 +17,23 @@
 | Layer | Technology |
 |---|---|
 | Frontend | React 18, React Router 6, Axios, marked (markdown rendering), plain CSS (dark/light via CSS variables) |
-| Backend | Node.js, Express 5 |
-| Database | MongoDB with Mongoose 9 |
-| Cache / rate-limit | Redis (node-redis v5) |
-| Auth | JWT in `httpOnly` + `Secure` + `SameSite=None` cookie, bcryptjs |
-| Email | Brevo transactional email API |
-| AI | Google Gemini (`gemini-2.5-flash`) via `@google/generative-ai` |
+| Backend | Python 3.11+, **FastAPI** + Uvicorn (fully async) |
+| Database | MongoDB via PyMongo's async client (`AsyncMongoClient`) |
+| Cache / rate-limit | Redis (`redis-py`, asyncio) |
+| Auth | JWT (PyJWT, HS256) in `httpOnly` + `Secure` + `SameSite=None` cookie, `bcrypt` |
+| Email | Resend transactional email API (via `httpx`) |
+| AI | Google Gemini (`gemini-2.5-flash`) via `google-genai` |
+| Scraping | `httpx` + BeautifulSoup, with Playwright (and Playwright + stealth) as fallbacks |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    UI[React app] -- cookie auth --> API[Express API]
+    UI[React app] -- cookie auth --> API[FastAPI API]
     API --> M[(MongoDB)]
     API --> R[(Redis)]
     API --> G[Gemini API]
-    API --> B[Brevo email]
+    API --> B[Resend email]
     API --> P1[LeetCode GraphQL]
     API --> P2[Codeforces API]
     API --> P3[CodeChef / GFG pages]
@@ -45,11 +44,13 @@ flowchart LR
 ```
 GET /api/dashboard/dashboard
   → load user's saved usernames from MongoDB
-  → for each platform (in parallel):
+  → for each platform (concurrently, asyncio.gather):
         Redis hit?  → use it
         miss        → fetch from the platform → store in Redis (24 h)
   → aggregate totals → respond
 ```
+
+CodeChef and GFG are fetched with three fallback strategies: plain HTTP + BeautifulSoup → headless Playwright → Playwright with stealth patches.
 
 See the flow diagrams in [`Backend/controllers/authFlow.md`](Backend/controllers/authFlow.md) and the `Backend/utils/*Flow.md` files.
 
@@ -58,13 +59,16 @@ See the flow diagrams in [`Backend/controllers/authFlow.md`](Backend/controllers
 ```
 COD_TRAKR/
 ├── Backend/
-│   ├── index.js                  # app bootstrap: CORS, routes, DB + Redis connect
-│   ├── config/                   # db.js, redis.js, axiosConfig.js
-│   ├── middlewares/auth.js       # JWT cookie verification (+ token blocklist check)
-│   ├── routes/                   # authRoute, dashRoute, notesRoutes, chatRoute
-│   ├── controllers/              # authController, dashboardController, noteController, chatController
-│   ├── models/                   # User, Note, Chat
-│   └── utils/                    # leetcode, codeforces, codechef, gfg, sendEmail, generateOTP, validator
+│   ├── main.py                   # app bootstrap: CORS, routers, /health, /logout, DB + Redis startup
+│   ├── requirements.txt
+│   ├── .env.example
+│   ├── config/                   # db.py, redis_client.py, http_client.py
+│   ├── middlewares/auth.py       # JWT cookie verification (+ token blocklist check)
+│   ├── routes/                   # auth_route, dash_route, notes_routes, chat_route
+│   ├── controllers/              # auth_controller, dashboard_controller, note_controller, chat_controller
+│   ├── models/                   # user.py, note.py, chat.py (schema defaults, casting, validation)
+│   └── utils/                    # leetcode, codeforces, codechef, gfg, browsers, send_email,
+│                                 # generate_otp, validator, common
 ├── frontend_react/               # current React client (Create React App)
 │   └── src/ (api.js, App.jsx, components/Layout.jsx, pages/*, styles/global.css)
 └── frontend_plain/               # legacy plain HTML/JS client (superseded by frontend_react)
@@ -74,43 +78,46 @@ COD_TRAKR/
 
 ### Prerequisites
 
-- Node.js 18+
+- Python 3.11+ (developed on 3.12)
 - A MongoDB database (local or Atlas)
 - A Redis instance (local or cloud)
-- API keys: [Brevo](https://www.brevo.com/) (email) and [Google AI Studio](https://aistudio.google.com/) (Gemini)
+- API keys: [Resend](https://resend.com/) (email) and [Google AI Studio](https://aistudio.google.com/) (Gemini)
 
 ### 1. Backend
 
 ```bash
 cd Backend
-npm install
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium        # needed for the CodeChef / GFG browser fallbacks
 ```
 
-Create `Backend/.env`:
+Create `Backend/.env` (see `.env.example`):
 
 ```env
 PORT=4000
 MONGO_URI=mongodb+srv://<user>:<pass>@<cluster>/<db>
 JWT_KEY=<long random string>
-NODE_ENV=production
 
 REDIS_USER_NAME=default
 REDIS_USER_PASS=<redis password>
 REDIS_USER_HOST=<redis host>
 REDIS_USER_PORT=<redis port>
 
-BREVO_API_KEY=<brevo api key>
+RESEND_API_KEY=<resend api key>
 GEMINI_API_KEY=<gemini api key>
 ```
 
 ```bash
-npm run dev     # nodemon
-# or
-npm start
+python main.py                                        # runs on 0.0.0.0:$PORT (default 4000)
+# or, with auto-reload for development
+uvicorn main:app --reload --host 127.0.0.1 --port 4000
 ```
 
-The API listens on `http://127.0.0.1:4000`.
+The API listens on `http://127.0.0.1:4000`. Health check: `GET /health` (returns `503` if MongoDB or Redis is unreachable).
 
+> Redis is optional at startup (the server logs a warning and keeps running), but auth, caching and OTP signup need it to work.
 
 ### 2. Frontend
 
@@ -122,6 +129,9 @@ npm start       # http://localhost:3000
 
 The API base URL is defined in `frontend_react/src/api.js`. Point it at `http://127.0.0.1:4000` for local development.
 
+### Migrating from the Node.js backend
+
+The FastAPI backend is a drop-in replacement: same routes, response shapes, `.env` names (except `BREVO_API_KEY` → `RESEND_API_KEY`, which is what the email code actually uses), MongoDB collections (`users`, `notes`, `chats`), Redis keys, and JWT/cookie format. Existing data and already-issued login cookies keep working.
 
 ## API reference
 
@@ -146,7 +156,7 @@ All routes are prefixed with the API base URL. Routes marked 🔒 require the `t
 { "message": "OTP sent", "signupId": "b1d2…-uuid" }
 ```
 
-- Password rules: 8-128 chars, at least 1 lowercase, 1 uppercase, 1 number, 1 symbol, no spaces.
+- Password rules: 4-128 chars, no spaces. Email must be valid (4-100 chars).
 - Rate limit: **4 OTP requests per email per 3 hours** (`429` after that).
 - The pending signup (with hashed password and hashed OTP) lives in Redis for **5 minutes**.
 
@@ -213,11 +223,11 @@ All routes are prefixed with the API base URL. Routes marked 🔒 require the `t
 | POST | `/api/notes/new` | 🔒 | Create a problem note |
 | GET | `/api/notes/problem?page=1` | 🔒 | All notes, ordered by `problemId` |
 | GET | `/api/notes/problemByImportance?page=1` | 🔒 | All notes, highest stars first |
-| GET | `/api/notes/problemById/:problemId` | 🔒 | One note with all fields |
-| PUT | `/api/notes/problem/:problemId` | 🔒 | Update a note |
-| DELETE | `/api/notes/problem/:problemId` | 🔒 | Delete a note |
-| GET | `/api/notes/tag/:tag?page=1` | 🔒 | Notes containing a tag |
-| GET | `/api/notes/stars/:stars?page=1` | 🔒 | Notes with an exact star rating (0-3) |
+| GET | `/api/notes/problemById/{problemId}` | 🔒 | One note with all fields |
+| PUT | `/api/notes/problem/{problemId}` | 🔒 | Update a note |
+| DELETE | `/api/notes/problem/{problemId}` | 🔒 | Delete a note |
+| GET | `/api/notes/tag/{tag}?page=1` | 🔒 | Notes containing a tag |
+| GET | `/api/notes/stars/{stars}?page=1` | 🔒 | Notes with an exact star rating (0-3) |
 
 **`POST /api/notes/new`**
 
@@ -254,7 +264,7 @@ All routes are prefixed with the API base URL. Routes marked 🔒 require the `t
 
 | Field | Rule |
 |---|---|
-| `problemName` | required, 3-100 chars, stored lowercase, unique per user |
+| `problemName` | required, 3-100 chars, stored lowercase, unique (enforced by a MongoDB unique index) |
 | `problemDescription` / `problemLink` | max 200 chars |
 | `stars` | 0, 1, 2 or 3 |
 | `tags` | max 10 |
